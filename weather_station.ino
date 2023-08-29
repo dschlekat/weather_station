@@ -1,25 +1,36 @@
 /*
-  Communicate with BME280s with different I2C addresses
-  Nathan Seidle @ SparkFun Electronics
-  March 23, 2015
+  Written Donovan Schlekat @ UNC Chapel Hill for PHYS 231 / Argus Array Temperature Prototyping
+  Github: https://github.com/dschlekat
 
-  Modified by Donovan Schlekat @ UNC Chapel Hill for PHYS 231
-  April 23, 2023
+  This sketch allows the user to connect multiple BME280 temperature sensors to a NodeMCU
+  using a TCA9548A I2C multiplexer. The temperature, pressure and humidity readings from
+  the sensors are then sent to the user's Blynk dashboard via a wireless connection, 
+  where they can be viewed from anywhere in the world with an internet connection.
 
-  Feel like supporting our work? Buy a board from SparkFun!
-  https://www.sparkfun.com/products/14348 - Qwiic Combo Board
-  https://www.sparkfun.com/products/13676 - BME280 Breakout Board
+  Alternatively, readings can be displayed on a custom website local to the 
+  network, or to a website posted online.
 
-  This example shows how to connect two sensors on the same I2C bus.
-
-  The BME280 has two I2C addresses: 0x77 (jumper open) or 0x76 (jumper closed)
+  Another option is to write the data via the NodeMCU's serial port to whatever
+  method of data transmission is used by Argus.
 
   Hardware connections:
-  BME280 -> I2C Multiplexer -> Arduino
-  GND -> edit -> GND
-  3.3 -> edit -> 3.3
-  SDA -> edit -> A4
-  SCL -> edit -> A5
+
+  The connections below assume one is connecting multiple temperature sensors to the I2C multiplexer.
+  If one sensor is used per NodeMCU instead, connect the sensor to the microcontroller using the multiplexer connection schematic.
+  
+  +=====+
+  BME280 -> I2C Multiplexer,NodeMCU
+  GND -> Node GND          // Ground
+  3.3 -> Node 3V3          // Power
+  SDA -> Multiplexer SDn   // Communication
+  SCL -> Multiplexer SCn   // Communication
+
+  I2C Multiplexer -> NodeMCU
+  GND -> GND   // Ground
+  VIN -> 3V3   // Power
+  SDA -> D2    // Communication
+  SCL -> D1    // Communication
+  +=====+
 */
 
 /*
@@ -27,188 +38,164 @@ Sensor detection and communication
 */
 
 #include <Wire.h>
-
 #include "SparkFunBME280.h"
-BME280 mySensorA; //Uses default I2C address 0x77
-BME280 mySensorB; //Uses I2C address 0x76 (jumper closed)
+
+//Sets sensor names. Add additional sensors here.
+BME280 SensorA; //Uses default I2C address 0x77
+BME280 SensorB; //Uses I2C address 0x76 (jumper closed)
 
 //Variables for heartbeat routine
 int i = 0;
-int grnLEDPin = 12;
+int ESP12_LED = 2;
 
-//Connection bools
+//Connection bools. Add bools for additional sensors here.
 bool connectionA = 1;
 bool connectionB = 1;
 
 /*
-Wireless Connection and Blynk Communication - Core Lab 8
-Created by Rui Santos, modified by Dr. J, modified by Donovan Schlekat
+Wireless Connection and Blynk - One Option for Communication
 */
 
-// Load Wi-Fi library
+#define BLYNK_PRINT Serial
+
+//Blynk template information. Accessed from Blynk's website.
+#define BLYNK_TEMPLATE_ID "TMPL2WvMza-OA"
+#define BLYNK_TEMPLATE_NAME "weather station"
+#define BLYNK_AUTH_TOKEN "qZS43MEOj8SuF4Zq8ODpl7XZK8Bt2xku"
+
+//Required libraries.
 #include <ESP8266WiFi.h>
+#include <BlynkSimpleEsp8266.h>
 
-// Replace with your network credentials
-const char* ssid     = "22-23-UNC-PSK";
-const char* password = "ReachHighAndDreamBig";
-const char *yourname = "Donovan Schlekat"; // don't show a video with Dr J's name in it
+// 
+// Auth tocken accessed from Blynk App. Go to the Project Settings (nut icon).
+char auth[] = BLYNK_AUTH_TOKEN;
 
-char web_server_title[100];
+// Your WiFi credentials. Depends on network.
+// Set password to "" for open networks.
+char ssid[] = "23-24-UNC-PSK";
+char pass[] = "HopeIsASuperpower";
 
-// Set web server port number to 80
-WiFiServer server(80);
 
-// Variable to store the HTTP request
-String header;
 
-// Auxiliary variables to store the current output state
-String ESP12_LED_State = "off";
-String nodeMCU_LED_State = "off";
 
-// Assign output variables to GPIO pins
-const int ESP12_LED = 2;    //this is the LED by the antenna
-const int nodeMCU_LED = 16; //this is the LED by the USB connector
-
-// Current time
-unsigned long currentTime = millis();
-// Previous time
-unsigned long previousTime = 0;
-// Define timeout time in milliseconds (example: 2000ms = 2s)
-const long timeoutTime = 2000;
-
-// reversed source/sink logic
-// you should probably ask about this on Discord
-#define lo HIGH
-#define hi LOW
+// Multiplexer connection function. When connecting to a device, call the function with the number of the bus (1-8) the device is connecting to.
+void TCA9548A(uint8_t bus){
+  Wire.beginTransmission(0x70);  // TCA9548A address
+  Wire.write(1 << bus);          // send byte to select bus
+  Wire.endTransmission();
+  Serial.print(bus);
+}
 
 void setup()
 {
-  pinMode(grnLEDPin, OUTPUT);
-  Serial.begin(115200);
-  Serial.println("Connecting...");
+  /*
+  Connect to web server
+  */
+  yield();
+  Serial.begin(9600);
+  Serial.println("Connecting to Blynk...");
+  Blynk.begin(auth, ssid, pass);
+  
+  /*
+  Connect to sensors
+  */
+  pinMode(ESP12_LED, OUTPUT);
+  Serial.println("Connecting to sensors...");
 
   Wire.begin();
 
-  mySensorA.setI2CAddress(0x77); //The default for the SparkFun Environmental Combo board is 0x77 (jumper open).
+  SensorA.setI2CAddress(0x77); //The default for the SparkFun Environmental Combo board is 0x77 (jumper open).
   //If you close the jumper it is 0x76
-  //The I2C address must be set before .begin() otherwise the cal values will fail to load.
 
-  if(mySensorA.beginI2C() == false) {
-    Serial.println("Sensor A connect failed");
+  TCA9548A(2);
+  if(!SensorA.beginI2C()) {
+    Serial.println("Sensor A connection failed");
     connectionA = 0;
   }
-
-  mySensorB.setI2CAddress(0x76); //Connect to a second sensor
-
-  if (mySensorB.beginI2C() == false) {
-    Serial.println("Sensor B connect failed");
-    connectionB = 0;
+  else {
+    Serial.println("Sensor A connected");
   }
 
+  SensorB.setI2CAddress(0x77); //Connect to a second sensor
 
-  // mySensorA.settings.commInterface = I2C_MODE;
-	// mySensorA.settings.runMode = 3; //  3, Normal mode
-	// mySensorA.settings.tStandby = 0; //  0, 0.5ms
-	// mySensorA.settings.filter = 0; //  0, filter off
-	// //tempOverSample can be:
-	// //  0, skipped
-	// //  1 through 5, oversampling *1, *2, *4, *8, *16 respectively
-	// mySensorA.settings.tempOverSample = 1;
-	// //pressOverSample can be:
-	// //  0, skipped
-	// //  1 through 5, oversampling *1, *2, *4, *8, *16 respectively
-  //   mySensorA.settings.pressOverSample = 1;
-	// //humidOverSample can be:
-	// //  0, skipped
-	// //  1 through 5, oversampling *1, *2, *4, *8, *16 respectively
-	// mySensorA.settings.humidOverSample = 1;
-
-  // mySensorB.settings.commInterface = I2C_MODE;
-	// mySensorB.settings.runMode = 3; //  3, Normal mode
-	// mySensorB.settings.tStandby = 0; //  0, 0.5ms
-	// mySensorB.settings.filter = 0; //  0, filter off
-	// //tempOverSample can be:
-	// //  0, skipped
-	// //  1 through 5, oversampling *1, *2, *4, *8, *16 respectively
-	// mySensorB.settings.tempOverSample = 1;
-	// //pressOverSample can be:
-	// //  0, skipped
-	// //  1 through 5, oversampling *1, *2, *4, *8, *16 respectively
-  //   mySensorB.settings.pressOverSample = 1;
-	// //humidOverSample can be:
-	// //  0, skipped
-	// //  1 through 5, oversampling *1, *2, *4, *8, *16 respectively
-	// mySensorB.settings.humidOverSample = 1;
+  TCA9548A(6);
+  if (SensorB.beginI2C() == false) {
+    Serial.println("Sensor B connection failed");
+    connectionB = 0;
+  }
+  else {
+    Serial.println("Sensor B connected");
+  }
 }
 
 void loop()
 {
-  //Display readings from each connection
+  Blynk.run();
+
+  //Display readings from each connected sensor
   if (connectionA == 1) {
+    //Read values from sensor
+    //Note: Farenheit can be changed to Celsius
+    float tempA = SensorA.readTempF();
+    //float tempA = SensorA.readTempC();
+    float humA = SensorA.readFloatHumidity();
+    float pressA = SensorA.readFloatPressure() / 100;
+
+    //Print to serial port (optional)
     Serial.print("HumidityA: ");
-    Serial.print(mySensorA.readFloatHumidity(), 0);
-
-    Serial.print("; PressureA: ");
-    Serial.print(mySensorA.readFloatPressure(), 0);
-
-    Serial.print("; TempA: ");
-    //Serial.print(mySensorA.readTempC(), 2);
-    Serial.print(mySensorA.readTempF(), 2);
-
+    Serial.print(humA, 0);
+    Serial.print("%RH; PressureA: ");
+    Serial.print(pressA, 0);
+    Serial.print("hPa; TempA: ");
+    Serial.print(tempA, 2);
+    Serial.print("F");
     Serial.println();
+
+    //Post data to Blynk
+    Blynk.virtualWrite(V1, tempA);
+    Blynk.virtualWrite(V2, pressA);
+    Blynk.virtualWrite(V3, humA);
   }
 
   if (connectionB == 1) {
-    Serial.print("; HumidityB: ");
-    Serial.print(mySensorB.readFloatHumidity(), 0);
+    //Read values from sensor
+    //Note: Farenheit can be changed to Celsius
+    float tempB = SensorB.readTempF();
+    //float tempB = SensorB.readTempC();
+    float humB = SensorB.readFloatHumidity();
+    float pressB = SensorB.readFloatPressure() / 100;
 
-    Serial.print("; PressureB: ");
-    Serial.print(mySensorB.readFloatPressure(), 0);
-
-    Serial.print("; TempB: ");
-    //Serial.print(mySensorB.readTempC(), 2);
-    Serial.print(mySensorB.readTempF(), 2);
-
+    //Print to serial port (optional)
+    Serial.print("HumidityB: ");
+    Serial.print(humB, 0);
+    Serial.print("%RH; PressureB: ");
+    Serial.print(pressB, 0);
+    Serial.print("hPa; TempB: ");
+    Serial.print(tempB, 2);
+    Serial.print("F");
     Serial.println();
+
+    //Post data to Blynk
+    Blynk.virtualWrite(V4, tempB);
+    Blynk.virtualWrite(V5, pressB);
+    Blynk.virtualWrite(V6, humB);
   }
 
 
   //Heartbeat routine
   if (i % 2 == 1) {
-    digitalWrite(grnLEDPin, HIGH);
+    digitalWrite(ESP12_LED, HIGH);
     delay(1000);
   }
   else {
-    digitalWrite(grnLEDPin, LOW);
+    digitalWrite(ESP12_LED, LOW);
     delay(1000);
   }
 
   //Loop for heartbeat routine
   i ++ ;
-  if (i == 16) {
+  if (i == 2) {
     i = 0;
   }
 }
-
-// void scanner ()
-// {
-//    byte error, address;
-//    int nDevices;
-//  Serial.println("Scanning…");
-//  nDevices = 0;
-//    for (address = 1; address < 127; address++ )
-//    {
-//      // The i2c_scanner uses the return value of
-//      // the Write.endTransmisstion to see if
-//      // a device did acknowledge to the address.
-//      Wire.beginTransmission(address);
-//      error = Wire.endTransmission();
-//  if (error == 0) {   Serial.print("I2C device found at address 0x");   if (address < 16)     Serial.print("0");   Serial.print(address, HEX);   Serial.println("  !");   nDevices++; } else if (error == 4) {   Serial.print("Unknown error at address 0x");   if (address < 16)     Serial.print("0");   Serial.println(address, HEX); }
-//  }
-//    if (nDevices == 0)
-//      Serial.println("No I2C devices found");
-//    else
-//      Serial.println("done");
-//  delay(5000);           // wait 5 seconds for next scan
-//  }
-
